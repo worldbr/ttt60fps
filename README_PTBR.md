@@ -19,6 +19,14 @@ Objetivo: recuperar efeitos sem voltar a duplicar a velocidade do processador de
 5. Reinicie completamente o jogo e inicie batalha normal. Compare efeitos, animacoes, movimentos, relogio e FPS.
 6. Veja `PPSSPP/PSP/PLUGINS/TTT_FPS_TEST/diagnostico_60fps.txt` e compartilhe o log. `HOOK INSTALADO` confirma a interceptacao; `AMOSTRA` deve mostrar `hits` aproximadamente o dobro de `actual`.
 
+## Correcao de compilacao V2 (erro `_exit`)
+
+O projeto original chamava `snprintf()` da biblioteca C padrao, trazendo dependencias da `newlib` para um PRX construido com `-nostartfiles`. Isso causou o erro `libc.a(libc_a-abort.o): undefined reference to '_exit'` ao linkar no PSPDEV GCC 15.2.0. A V2 eliminou as chamadas a `snprintf()` e usa formatacao propria (texto, hex e decimal), sem `stdio.h`. O Makefile tambem usa `-ffreestanding -fno-builtin` para evitar dependencias implicitas da libc.
+
+**Substitua os arquivos `src/main.c` e `Makefile` ou utilize este ZIP completo.** O workflow inclui `make clean` antes de compilar, para nao reutilizar objetos antigos.
+
+Esta versao foi revisada estaticamente; o compilador PSPDEV nao esta instalado no ambiente de preparacao. A compilacao definitiva deve ser verificada no GitHub Actions.
+
 ## Explicacao tecnica
 
 O patch anterior `_L 0x2007B9D4 0x00000000` apagava a chamada original `jal 0x08901E10` em RAM no endereco `0x0887B9D4`. Essa rotina percorre os callbacks de atualizacao de objetos; desativar por completo impede que parte dos efeitos seja criada/atualizada.

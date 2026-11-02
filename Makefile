@@ -1,6 +1,6 @@
 TARGET = ttt_fps_teste05
 OBJS = src/main.o
-CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu11
+CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu11 -ffreestanding -fno-builtin
 LDFLAGS = -nostartfiles
 BUILD_PRX = 1
 PRX_EXPORTS = exports.exp

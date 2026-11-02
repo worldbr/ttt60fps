@@ -12,7 +12,6 @@
 #include <psputils.h>
 #include <stdint.h>
 #include <stddef.h>
-#include <stdio.h>
 
 PSP_MODULE_INFO("TTTFPSTest05", PSP_MODULE_USER, 1, 0);
 PSP_NO_CREATE_MAIN_THREAD();
@@ -68,16 +67,54 @@ static void flush_code(volatile uint32_t *site) {
     sceKernelIcacheInvalidateRange(p, 4);
 }
 
+/* Avoid stdio/newlib inside the PRX: snprintf() pulled in libc.a and
+ * made the linker demand _exit when building with -nostartfiles.
+ * All formatting here is bounded and uses no standard C library calls. */
+static void append_text(char **pos, char *last, const char *src) {
+    if (!src) return;
+    while (*src && *pos < last) *(*pos)++ = *src++;
+}
+
+static void append_uint(char **pos, char *last, uint32_t number) {
+    char rev[10];
+    unsigned count = 0;
+    do {
+        rev[count++] = (char)('0' + (number % 10u));
+        number /= 10u;
+    } while (number && count < sizeof(rev));
+    while (count && *pos < last) *(*pos)++ = rev[--count];
+}
+
+static void append_hex32(char **pos, char *last, uint32_t number) {
+    static const char digits[] = "0123456789ABCDEF";
+    int shift;
+    for (shift = 28; shift >= 0 && *pos < last; shift -= 4)
+        *(*pos)++ = digits[(number >> shift) & 15u];
+}
+
 static void log_status(const char *label) {
     char msg[250];
+    char *pos = msg;
+    char *last = msg + sizeof(msg) - 1;
     uint32_t word = *(volatile uint32_t *)(uintptr_t)TTT_UPDATE_CALL_ADDR;
     uint32_t step = *(volatile uint32_t *)(uintptr_t)TTT_VBLANK_STEP_ADDR;
-    int n = snprintf(msg, sizeof(msg),
-        "[TESTE05] %s callsite=%08X step=%u hits=%u actual=%u skipped=%u installed=%d\n",
-        label, (unsigned)word, (unsigned)step,
-        (unsigned)g_hits, (unsigned)g_actual_updates,
-        (unsigned)g_skipped_updates, g_installed);
-    if (n > 0) log_line(msg);
+    append_text(&pos, last, "[TESTE05] ");
+    append_text(&pos, last, label);
+    append_text(&pos, last, " callsite=");
+    append_hex32(&pos, last, word);
+    append_text(&pos, last, " step=");
+    append_uint(&pos, last, step);
+    append_text(&pos, last, " hits=");
+    append_uint(&pos, last, g_hits);
+    append_text(&pos, last, " actual=");
+    append_uint(&pos, last, g_actual_updates);
+    append_text(&pos, last, " skipped=");
+    append_uint(&pos, last, g_skipped_updates);
+    append_text(&pos, last, " installed=");
+    append_uint(&pos, last, (uint32_t)g_installed);
+    append_text(&pos, last, "\n");
+    *pos = '\0';
+    log_line(msg);
 }
 
 static int install_hook(void) {
@@ -92,9 +129,15 @@ static int install_hook(void) {
     }
     value = *site;
     if (value != TTT_UPDATE_CALL_WORD) {
-        char msg[110];
-        snprintf(msg, sizeof(msg), "[TESTE05] ERRO: opcode esperado=%08X lido=%08X. NADA ALTERADO.\n",
-                 (unsigned)TTT_UPDATE_CALL_WORD, (unsigned)value);
+        char msg[128];
+        char *pos = msg;
+        char *last = msg + sizeof(msg) - 1;
+        append_text(&pos, last, "[TESTE05] ERRO: opcode esperado=");
+        append_hex32(&pos, last, TTT_UPDATE_CALL_WORD);
+        append_text(&pos, last, " lido=");
+        append_hex32(&pos, last, value);
+        append_text(&pos, last, ". NADA ALTERADO.\n");
+        *pos = '\0';
         log_line(msg);
         return -2;
     }
