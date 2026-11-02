@@ -22,6 +22,7 @@ jobs:
           export PSPDEV=/usr/local/pspdev
           export PATH="$PSPDEV/bin:$PATH"
           psp-gcc --version
+          make clean || true
           make
           test -s ttt_fps_teste05.prx
           mkdir -p dist/TTT_FPS_TEST
