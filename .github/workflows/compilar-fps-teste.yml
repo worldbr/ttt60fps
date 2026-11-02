@@ -1,0 +1,34 @@
+name: TTT FPS Teste 05 - PRX experimental
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/**'
+      - 'Makefile'
+      - 'exports.exp'
+      - 'TTT_FPS_TEST/**'
+      - '.github/workflows/compilar-fps-teste.yml'
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container:
+      image: pspdev/pspdev:v20261001
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilar PRX standalone
+        shell: bash
+        run: |
+          set -eux
+          export PSPDEV=/usr/local/pspdev
+          export PATH="$PSPDEV/bin:$PATH"
+          psp-gcc --version
+          make
+          test -s ttt_fps_teste05.prx
+          mkdir -p dist/TTT_FPS_TEST
+          cp ttt_fps_teste05.prx dist/TTT_FPS_TEST/
+          cp TTT_FPS_TEST/plugin.ini dist/TTT_FPS_TEST/
+          cp README_PTBR.md dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TTT-FPS-Teste05-PRX
+          path: dist/
