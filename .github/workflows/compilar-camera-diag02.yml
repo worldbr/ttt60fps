@@ -1,0 +1,35 @@
+name: TTT - Camera Diagnostico V02
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/**'
+      - 'Makefile'
+      - 'exports.exp'
+      - 'TTT_CAMERA_DIAG02/**'
+      - '.github/workflows/compilar-camera-diag02.yml'
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container:
+      image: pspdev/pspdev:v20261001
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilar
+        shell: bash
+        run: |
+          set -eux
+          export PSPDEV=/usr/local/pspdev
+          export PATH="$PSPDEV/bin:$PATH"
+          psp-gcc --version
+          make clean || true
+          make
+          test -s ttt_camera_diag02.prx
+          mkdir -p dist/TTT_CAMERA_DIAG02
+          cp ttt_camera_diag02.prx dist/TTT_CAMERA_DIAG02/
+          cp TTT_CAMERA_DIAG02/plugin.ini dist/TTT_CAMERA_DIAG02/
+          cp README_PTBR.md dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TTT-Camera-Diagnostico-V02
+          path: dist/
