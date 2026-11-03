@@ -1,37 +1,27 @@
 #!/usr/bin/env python3
-"""Confirm the exact byte layout of the ULUS10537 EBOOT original used in the research."""
-import hashlib
-import struct
-import sys
+"""Verifica os JALs e delay slots originais antes de usar o projeto."""
+import sys,struct,hashlib
 from pathlib import Path
-
-SHA = "834605685873da14647b1dfe7bf332e326dd2a99a48840877da13d211ea18b1e"
-CALLS = [
-    (0x0885AC9C, 0x0E21EE6B, 0x00000000, 0x0887B9AC),
-    (0x0887B9D4, 0x0E240784, 0x8C840000, 0x08901E10),
-    (0x0885ACAC, 0x0E21EE94, 0x00000000, 0x0887BA50),
-    (0x0887BB0C, 0x0E24084D, 0x8C840000, 0x08902134),
-    (0x08804728, 0x0E20DEDA, 0x00000000, 0x08837B68),
+EXPECTED_HASH="834605685873da14647b1dfe7bf332e326dd2a99a48840877da13d211ea18b1e"
+BASE=0x08804040
+BASE_OFFSET=0x1018
+CASES=[
+ (0x089AB02C, 0x0E26AF95, "jal 0x089ABE54 - ramo A"),
+ (0x089AB030, 0x02202825, "delay slot A"),
+ (0x089AB734, 0x0E26AF95, "jal 0x089ABE54 - ramo B"),
+ (0x089AB738, 0x02E02825, "delay slot B"),
+ (0x089AB538, 0xE60C0070, "swc1 pos x"),
+ (0x089AB54C, 0xE60C0074, "swc1 pos y"),
+ (0x089AB560, 0xE60C0078, "swc1 pos z"),
 ]
-
-
-def check(p):
-    b = Path(p).read_bytes()
-    digest = hashlib.sha256(b).hexdigest()
-    print("SHA-256:", digest)
-    assert digest == SHA, "ELF não corresponde à versão usada na pesquisa"
-    for site, word, delay, target in CALLS:
-        pos = 0x1018 + site - 0x08804040
-        got, delay_got = struct.unpack_from('<II', b, pos)
-        decoded = ((site + 4) & 0xF0000000) | ((got & 0x3FFFFFF) << 2)
-        assert got == word, f"opcode divergente em {site:08X}: {got:08X}"
-        assert delay_got == delay, f"delay slot divergente em {site:08X}: {delay_got:08X}"
-        assert decoded == target, f"destino divergente em {site:08X}: {decoded:08X}"
-        print(f"OK 0x{site:08X} = 0x{got:08X}, delay 0x{delay:08X} -> 0x{target:08X}")
-    print("OK: cinco pontos de hook verificados no EBOOT original.")
-
-
-if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        sys.exit('Uso: python tests/verificar_elf.py <arquivo-ELF-original>')
-    check(sys.argv[1])
+if len(sys.argv)!=2: raise SystemExit('Uso: python tests/verificar_elf.py CAMINHO_DO_EBOOT.ELF')
+b=Path(sys.argv[1]).read_bytes()
+checksum=hashlib.sha256(b).hexdigest()
+print('ELF SHA256:',checksum)
+if checksum!=EXPECTED_HASH: raise SystemExit('ERRO: ELF nao corresponde a referencia')
+for va,expected,name in CASES:
+    off=BASE_OFFSET+(va-BASE)
+    actual=struct.unpack_from('<I',b,off)[0]
+    print(f'{name}: 0x{va:08X} -> 0x{actual:08X}')
+    assert actual==expected,(name,hex(actual),hex(expected))
+print('OK: todos os enderecos/opcodes conferem.')

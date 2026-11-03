@@ -1,233 +1,228 @@
 /*
- * Dragon Ball Z: Tenkaichi Tag Team - ULUS10537 - PPSSPP
- * TESTE 07: diagnosis ONLY, original game calls execute EVERY frame.
- * Does not patch the VBlank value. Does not skip or throttle updates.
- * Original ELF SHA-256: 834605685873da14647b1dfe7bf332e326dd2a99a48840877da13d211ea18b1e
+ * TTT Camera Distance experimental V0.1 - ULUS10537 - PPSSPP
+ * Reference ELF SHA256:
+ * 834605685873da14647b1dfe7bf332e326dd2a99a48840877da13d211ea18b1e
  *
- * Five JAL callsites are temporarily redirected to wrappers which increment
- * a counter and then call the ORIGINAL target. Original MIPS delay slots remain.
- * No IO in any hook; disk access only occurs in the separate worker thread.
+ * Unlike viewport cheats, this modifies the TRANSLATION of the camera's
+ * transform (cam + 0x40, translation + 0x30..0x38), along its local +Z axis.
+ * Actual zoom direction and effect compatibility MUST be checked in-game.
+ *
+ * Two validated JAL callsites call the camera matrix rebuild routine
+ * 0x089ABE54. Delay-slot instructions remain intact. Both hooks call the
+ * original destination once; NO gameplay logic/frame rate is modified.
  */
 #include <pspuser.h>
 #include <pspiofilemgr.h>
 #include <psputils.h>
+#include <pspctrl.h>
 #include <stdint.h>
 #include <stddef.h>
 
-PSP_MODULE_INFO("TTTFPSTest07", PSP_MODULE_USER, 1, 0);
+PSP_MODULE_INFO("TTTCamDist01", PSP_MODULE_USER, 1, 0);
 PSP_NO_CREATE_MAIN_THREAD();
 
-#define FPS_LOG "ms0:/PSP/PLUGINS/TTT_FPS_TEST07/diagnostico_teste07.txt"
-#define VBLANK_STEP_ADDR 0x08A78E0Cu
-#define SAMPLE_DELAY_US 5000000u
-#define HOOKS 5u
+#define LOG_PATH "ms0:/PSP/PLUGINS/TTT_CAMERA_DIST01/diagnostico_camera.txt"
+#define SITE_A 0x089AB02Cu
+#define SITE_B 0x089AB734u
+#define ORIG_JAL 0x0E26AF95u
+#define ORIG_A_DELAY 0x02202825u
+#define ORIG_B_DELAY 0x02E02825u
+#define ORIG_FN 0x089ABE54u
+#define BUTTON_COMBO (PSP_CTRL_LTRIGGER | PSP_CTRL_RTRIGGER | PSP_CTRL_TRIANGLE)
 
-/* Return values at these specific callsites are unused. For root walkers,
- * the original delay-slot loads a0, which the wrapper receives unchanged. */
-typedef void (*VoidFn)(void);
-typedef void (*RootFn)(void *);
+typedef void (*RebuildFn)(void *, void *);
+static volatile uint32_t g_count[2];
+static volatile uint32_t g_applied;
+static volatile uint32_t g_skipped;
+static volatile uint32_t g_last_cam;
+static volatile uint32_t g_last_xbits;
+static volatile uint32_t g_last_ybits;
+static volatile uint32_t g_last_zbits;
+static volatile uint32_t g_last_basis_len2bits;
+static volatile int g_mode = 0;  /* SAFE START: press L+R+TRIANGLE to enable */
+static volatile int g_installed = 0;
+static volatile int g_running = 0;
+static SceUID g_thread = -1;
 
-static volatile uint32_t g_hits[HOOKS];
-static volatile int g_running;
-static volatile int g_installed;
-static SceUID g_worker = -1;
+static uint32_t float_bits(float x) { union { float f; uint32_t u; } value; value.f = x; return value.u; }
 
-static __attribute__((noinline)) void observe_update_group(void) {
-    ++g_hits[0];
-    ((VoidFn)(uintptr_t)0x0887B9ACu)();
-}
-static __attribute__((noinline)) void observe_task_update(void *root) {
-    ++g_hits[1];
-    ((RootFn)(uintptr_t)0x08901E10u)(root);
-}
-static __attribute__((noinline)) void observe_draw_group(void) {
-    ++g_hits[2];
-    ((VoidFn)(uintptr_t)0x0887BA50u)();
-}
-static __attribute__((noinline)) void observe_task_draw(void *root) {
-    ++g_hits[3];
-    ((RootFn)(uintptr_t)0x08902134u)(root);
-}
-static __attribute__((noinline)) void observe_frame_composer(void) {
-    ++g_hits[4];
-    ((VoidFn)(uintptr_t)0x08837B68u)();
-}
-
-typedef struct HookSite {
-    uint32_t callsite;
-    uint32_t expected_jal;
-    uint32_t expected_delay;
-    void (*wrapper)(void);
-    const char *name;
-} HookSite;
-
-static const HookSite g_sites[HOOKS] = {
-    {0x0885AC9Cu, 0x0E21EE6Bu, 0x00000000u, observe_update_group,   "update_group"},
-    {0x0887B9D4u, 0x0E240784u, 0x8C840000u, (void (*)(void))observe_task_update, "task_update"},
-    {0x0885ACACu, 0x0E21EE94u, 0x00000000u, observe_draw_group,     "draw_group"},
-    {0x0887BB0Cu, 0x0E24084Du, 0x8C840000u, (void (*)(void))observe_task_draw,   "task_draw"},
-    {0x08804728u, 0x0E20DEDAu, 0x00000000u, observe_frame_composer, "frame_composer"},
-};
-
-static uint32_t jal_word(uintptr_t target) {
-    return 0x0C000000u | (((uint32_t)target >> 2) & 0x03FFFFFFu);
-}
-static void flush_code(void *site) {
-    sceKernelDcacheWritebackInvalidateRange(site, 4);
-    sceKernelIcacheInvalidateRange(site, 4);
-}
-
-/* Explicit bounded formatting: no stdio, snprintf, libc, heap allocation. */
-static void add_text(char **w, char *last, const char *s) {
-    if (!s) return;
-    while (*s && *w < last) *(*w)++ = *s++;
-}
-static void add_u32(char **w, char *last, uint32_t n) {
-    char reverse[10];
-    unsigned k = 0;
-    do {
-        reverse[k++] = (char)('0' + n % 10u);
-        n /= 10u;
-    } while (n && k < 10u);
-    while (k && *w < last) *(*w)++ = reverse[--k];
-}
-static void add_hex(char **w, char *last, uint32_t n) {
-    static const char h[] = "0123456789ABCDEF";
-    int k;
-    for (k = 28; k >= 0 && *w < last; k -= 4) *(*w)++ = h[(n >> k) & 0xFu];
-}
-static void log_line(const char *s) {
-    SceUID file;
-    size_t n = 0;
-    if (!s) return;
-    while (s[n] && n < 1023u) ++n;
-    file = sceIoOpen(FPS_LOG, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
-    if (file < 0) return;
-    sceIoWrite(file, s, (SceSize)n);
-    sceIoClose(file);
-}
-static void log_issue(const char *label, unsigned index, uint32_t expected, uint32_t actual) {
-    char msg[240];
-    char *w = msg;
-    char *end = msg + sizeof(msg) - 1;
-    add_text(&w, end, "[T07] ERRO "); add_text(&w, end, label);
-    add_text(&w, end, " site="); add_text(&w, end, g_sites[index].name);
-    add_text(&w, end, " endereco=0x"); add_hex(&w, end, g_sites[index].callsite);
-    add_text(&w, end, " esperado=0x"); add_hex(&w, end, expected);
-    add_text(&w, end, " lido=0x"); add_hex(&w, end, actual);
-    add_text(&w, end, "\n"); *w = 0;
-    log_line(msg);
-}
-static int validate_sites(void) {
-    unsigned i;
-    for (i=0; i<HOOKS; ++i) {
-        const HookSite *h = &g_sites[i];
-        volatile uint32_t *mem = (volatile uint32_t *)(uintptr_t)h->callsite;
-        uintptr_t wrapper = (uintptr_t)h->wrapper;
-        if ((wrapper & 3u) || (wrapper >> 28) != ((h->callsite + 4u) >> 28)) {
-            log_issue("JAL fora do alcance", i, h->expected_jal, (uint32_t)wrapper);
-            return -1;
-        }
-        if (mem[0] != h->expected_jal) {
-            log_issue("opcode incompativel", i, h->expected_jal, mem[0]);
-            return -2;
-        }
-        if (mem[1] != h->expected_delay) {
-            log_issue("delay slot incompativel", i, h->expected_delay, mem[1]);
-            return -3;
-        }
+/* Modes: off, +80, +160, -80 world units.
+   Negative mode is diagnostic if +Z moves forward instead of backward. */
+static float mode_distance(int mode) {
+    switch (mode) {
+    case 1: return 80.0f;
+    case 2: return 160.0f;
+    case 3: return -80.0f;
+    default: return 0.0f;
     }
+}
+
+static void adjust_camera(void *ptr) {
+    uintptr_t address = (uintptr_t)ptr;
+    float dist = mode_distance(g_mode);
+    volatile float *m;
+    float dx, dy, dz, len2, x, y, z;
+    if (dist == 0.0f) return;
+    if (address < 0x08800000u || address > 0x0BBFF000u || (address & 3u)) {
+        ++g_skipped;
+        return;
+    }
+    m = (volatile float *)(address + 0x40u);
+    /* PSP's 4x4 camera transform: local Z = third column.
+       The third column (m[8..10]) is expected to be a normalized axis. */
+    dx = m[8]; dy = m[9]; dz = m[10];
+    x = m[12]; y = m[13]; z = m[14];
+    len2 = dx*dx + dy*dy + dz*dz;
+    /* Protect against invalid/uninitialized matrices and absurd coordinates.
+       Explicit comparisons with NaNs evaluate false. */
+    if (!(len2 > 0.50f && len2 < 1.50f &&
+          x > -50000.0f && x < 50000.0f &&
+          y > -50000.0f && y < 50000.0f &&
+          z > -50000.0f && z < 50000.0f)) {
+        ++g_skipped;
+        return;
+    }
+    g_last_cam = (uint32_t)address;
+    g_last_xbits = float_bits(x);
+    g_last_ybits = float_bits(y);
+    g_last_zbits = float_bits(z);
+    g_last_basis_len2bits = float_bits(len2);
+    m[12] = x + dx * dist;
+    m[13] = y + dy * dist;
+    m[14] = z + dz * dist;
+    ++g_applied;
+}
+
+/* The original JAL delay slots set a1 ($5), so wrappers receive it intact. */
+static __attribute__((noinline)) void wrapper_a(void *cam, void *ref) {
+    ++g_count[0];
+    adjust_camera(cam);
+    ((RebuildFn)(uintptr_t)ORIG_FN)(cam, ref);
+}
+static __attribute__((noinline)) void wrapper_b(void *cam, void *ref) {
+    ++g_count[1];
+    adjust_camera(cam);
+    ((RebuildFn)(uintptr_t)ORIG_FN)(cam, ref);
+}
+
+static uint32_t jal_word(uintptr_t address) {
+    return 0x0C000000u | (((uint32_t)address >> 2) & 0x03FFFFFFu);
+}
+static void flush_code(void *ptr) {
+    sceKernelDcacheWritebackInvalidateRange(ptr, 4);
+    sceKernelIcacheInvalidateRange(ptr, 4);
+}
+static void add_str(char **p, char *end, const char *s) {
+    while (s && *s && *p < end) *(*p)++ = *s++;
+}
+static void add_u32(char **p, char *end, uint32_t n) {
+    char rev[10]; unsigned i=0;
+    do { rev[i++] = (char)('0' + n % 10u); n /= 10u; } while(n && i<10);
+    while(i && *p < end) *(*p)++ = rev[--i];
+}
+static void add_hex(char **p, char *end, uint32_t n) {
+    static const char hex[] = "0123456789ABCDEF";
+    int i;
+    for (i=28; i>=0 && *p<end; i-=4) *(*p)++ = hex[(n >> i) & 15u];
+}
+static void log_msg(const char *s) {
+    SceUID fd; size_t n=0;
+    if (!s) return;
+    while (s[n] && n<1024u) ++n;
+    fd = sceIoOpen(LOG_PATH, PSP_O_CREAT|PSP_O_APPEND|PSP_O_WRONLY, 0777);
+    if (fd < 0) return;
+    sceIoWrite(fd, s, (SceSize)n);
+    sceIoClose(fd);
+}
+static void sample_log(const char *title, uint32_t *last) {
+    char line[420]; char *p=line; char *end=line+sizeof(line)-1;
+    uint32_t ca=g_count[0], cb=g_count[1], applied=g_applied, skipped=g_skipped;
+    add_str(&p,end,"[CAM01] "); add_str(&p,end,title);
+    add_str(&p,end," modo="); add_u32(&p,end,(uint32_t)g_mode);
+    add_str(&p,end," call_A="); add_u32(&p,end,ca); add_str(&p,end,"(+"); add_u32(&p,end,ca-last[0]); add_str(&p,end,")");
+    add_str(&p,end," call_B="); add_u32(&p,end,cb); add_str(&p,end,"(+"); add_u32(&p,end,cb-last[1]); add_str(&p,end,")");
+    add_str(&p,end," aplicado="); add_u32(&p,end,applied); add_str(&p,end,"(+"); add_u32(&p,end,applied-last[2]); add_str(&p,end,")");
+    add_str(&p,end," ignorado="); add_u32(&p,end,skipped);
+    add_str(&p,end," cam=0x"); add_hex(&p,end,g_last_cam);
+    add_str(&p,end," posbits="); add_hex(&p,end,g_last_xbits);
+    add_str(&p,end,","); add_hex(&p,end,g_last_ybits);
+    add_str(&p,end,","); add_hex(&p,end,g_last_zbits);
+    add_str(&p,end," len2bits="); add_hex(&p,end,g_last_basis_len2bits);
+    add_str(&p,end,"\n"); *p=0;
+    last[0]=ca;last[1]=cb;last[2]=applied;
+    log_msg(line);
+}
+static void log_err(const char *detail, uint32_t actual) {
+    char line[220]; char *p=line; char *end=line+sizeof(line)-1;
+    add_str(&p,end,"[CAM01] ERRO ");add_str(&p,end,detail);
+    add_str(&p,end," obtido=0x");add_hex(&p,end,actual);
+    add_str(&p,end,"\n");*p=0; log_msg(line);
+}
+static int install(void) {
+    volatile uint32_t *a=(volatile uint32_t *)(uintptr_t)SITE_A;
+    volatile uint32_t *b=(volatile uint32_t *)(uintptr_t)SITE_B;
+    uintptr_t wa=(uintptr_t)wrapper_a, wb=(uintptr_t)wrapper_b;
+    if ((wa & 3u) || (wb & 3u) ||
+        ((wa>>28) != ((SITE_A+4u)>>28)) || ((wb>>28) != ((SITE_B+4u)>>28))) {
+        log_err("wrapper fora do alcance JAL",(uint32_t)wa); return -1;
+    }
+    if (a[0]!=ORIG_JAL) {log_err("opcode A nao original",a[0]);return -2;}
+    if (a[1]!=ORIG_A_DELAY) {log_err("delay A incorreto",a[1]);return -3;}
+    if (b[0]!=ORIG_JAL) {log_err("opcode B nao original",b[0]);return -4;}
+    if (b[1]!=ORIG_B_DELAY) {log_err("delay B incorreto",b[1]);return -5;}
+    a[0]=jal_word(wa);flush_code((void *)(uintptr_t)SITE_A);
+    b[0]=jal_word(wb);flush_code((void *)(uintptr_t)SITE_B);
+    g_installed=1;
+    log_msg("[CAM01] HOOKS INSTALADOS 2/2. Rotina original preservada.\n");
     return 0;
 }
-static int install_hooks(void) {
-    unsigned i;
-    if (validate_sites() < 0) return -1;
-    for (i=0; i<HOOKS; ++i) {
-        volatile uint32_t *mem = (volatile uint32_t *)(uintptr_t)g_sites[i].callsite;
-        mem[0] = jal_word((uintptr_t)g_sites[i].wrapper);
-        flush_code((void *)(uintptr_t)mem);
-    }
-    g_installed = 1;
-    log_line("[T07] HOOKS INSTALADOS 5/5; chamadas originais preservadas.\n");
-    return 0;
-}
-static void remove_hooks(void) {
-    unsigned i;
+static void uninstall(void) {
+    volatile uint32_t *a=(volatile uint32_t *)(uintptr_t)SITE_A;
+    volatile uint32_t *b=(volatile uint32_t *)(uintptr_t)SITE_B;
     if (!g_installed) return;
-    for (i=0; i<HOOKS; ++i) {
-        const HookSite *h = &g_sites[i];
-        volatile uint32_t *mem = (volatile uint32_t *)(uintptr_t)h->callsite;
-        if (mem[0] == jal_word((uintptr_t)h->wrapper)) {
-            mem[0] = h->expected_jal;
-            flush_code((void *)(uintptr_t)mem);
-        }
-    }
-    g_installed = 0;
+    if (a[0]==jal_word((uintptr_t)wrapper_a)) {a[0]=ORIG_JAL;flush_code((void *)(uintptr_t)SITE_A);}
+    if (b[0]==jal_word((uintptr_t)wrapper_b)) {b[0]=ORIG_JAL;flush_code((void *)(uintptr_t)SITE_B);}
+    g_installed=0;
 }
-static void sample_log(const char *label, uint32_t *prev) {
-    char msg[550];
-    char *w = msg;
-    char *end = msg + sizeof(msg) - 1;
-    uint32_t step = *(volatile uint32_t *)(uintptr_t)VBLANK_STEP_ADDR;
-    unsigned i;
-    add_text(&w,end,"[T07] "); add_text(&w,end,label);
-    add_text(&w,end," step="); add_u32(&w,end,step);
-    add_text(&w,end," instalado="); add_u32(&w,end,(uint32_t)g_installed);
-    for (i=0; i<HOOKS; ++i) {
-        uint32_t current = g_hits[i];
-        add_text(&w,end," "); add_text(&w,end,g_sites[i].name);
-        add_text(&w,end,"="); add_u32(&w,end,current);
-        add_text(&w,end,"(+"); add_u32(&w,end,current-prev[i]);
-        add_text(&w,end,"/5s)");
-        prev[i]=current;
-    }
-    add_text(&w,end,"\n"); *w=0;
-    log_line(msg);
-}
-static int worker_thread(SceSize args, void *argp) {
-    uint32_t previous[HOOKS] = {0,0,0,0,0};
-    unsigned tries;
-    (void)args; (void)argp;
-    log_line("[T07] Worker iniciado. Conferindo sites de hook...\n");
-    /* Wait for EBOOT to finish loading; allow a short startup period. */
+static int worker(SceSize argc, void *argv) {
+    uint32_t last[3]={0,0,0}; unsigned tries; int held=0;unsigned ticks=0;
+    SceCtrlData buttons;
+    (void)argc; (void)argv;
+    log_msg("[CAM01] Worker iniciou; verificando EBOOT.\n");
     for (tries=0; tries<100u && g_running; ++tries) {
-        if (*(volatile uint32_t *)(uintptr_t)g_sites[0].callsite == g_sites[0].expected_jal) break;
+        if (*(volatile uint32_t *)(uintptr_t)SITE_A==ORIG_JAL) break;
         sceKernelDelayThread(100000u);
     }
-    if (!g_running || tries == 100u || install_hooks() != 0) {
-        log_line("[T07] HOOK NAO INSTALADO; nao foi modificada nenhuma instrucao.\n");
-        sceKernelExitDeleteThread(0);
-        return 0;
+    if (tries==100u || !g_running || install()!=0) {
+        log_msg("[CAM01] Sem hook: nenhum codigo de camera alterado.\n");
+        sceKernelExitDeleteThread(0);return 0;
     }
-    log_line("[T07] Pronto. Capture amostras no menu (30 FPS baseline) e na batalha 60 FPS.\n");
+    log_msg("[CAM01] INICIA DESLIGADO. L+R+TRIANGULO: 0, +80, +160, -80 unidades.\n");
     while (g_running) {
-        sceKernelDelayThread(SAMPLE_DELAY_US);
-        if (g_running) sample_log("AMOSTRA", previous);
+        int down;
+        sceKernelDelayThread(50000u);
+        sceCtrlPeekBufferPositive(&buttons,1);
+        down=((buttons.Buttons & BUTTON_COMBO)==BUTTON_COMBO);
+        if (down && !held) {
+            g_mode=(g_mode+1)%4;
+            sample_log("MUDANCA DE MODO",last);
+        }
+        held=down;
+        if (++ticks>=100u) {sample_log("AMOSTRA 5s",last);ticks=0;}
     }
-    remove_hooks();
-    log_line("[T07] Hook removido.\n");
-    sceKernelExitDeleteThread(0);
-    return 0;
+    uninstall(); log_msg("[CAM01] Hook removido.\n");
+    sceKernelExitDeleteThread(0); return 0;
 }
 int module_start(SceSize args, void *argp) {
-    (void)args; (void)argp;
-    g_running = 1;
-    log_line("\n[T07] INICIO - DIAGNOSTICO SOMENTE; ZERO updates pulados.\n");
-    g_worker = sceKernelCreateThread("TTTFPSWorker07", worker_thread, 0x20, 0x2400, 0, NULL);
-    if (g_worker < 0) {
-        g_running=0;
-        log_line("[T07] ERRO ao criar worker.\n");
-        return 0;
-    }
-    if (sceKernelStartThread(g_worker, 0, NULL) < 0) {
-        g_running=0;
-        log_line("[T07] ERRO ao iniciar worker.\n");
-    }
+    (void)args;(void)argp;
+    log_msg("\n[CAM01] INICIO CAMARA TESTE V01 (sem alterar viewport).\n");
+    g_running=1;
+    g_thread=sceKernelCreateThread("TTTCamWorker01",worker,0x20,0x2400,0,NULL);
+    if(g_thread<0) {g_running=0;log_msg("[CAM01] Erro criar thread.\n");return 0;}
+    if(sceKernelStartThread(g_thread,0,NULL)<0) {g_running=0;log_msg("[CAM01] Erro iniciar thread.\n");}
     return 0;
 }
 int module_stop(SceSize args, void *argp) {
-    (void)args; (void)argp;
-    g_running = 0;
-    remove_hooks();
-    return 0;
+    (void)args;(void)argp;
+    g_running=0;uninstall();return 0;
 }
