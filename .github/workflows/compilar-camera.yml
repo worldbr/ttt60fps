@@ -1,0 +1,36 @@
+name: TTT - Camera afastada V01 experimental
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/**'
+      - 'Makefile'
+      - 'exports.exp'
+      - 'TTT_CAMERA_DIST01/**'
+      - '.github/workflows/compilar-camera.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container:
+      image: pspdev/pspdev:v20261001
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilar PRX
+        shell: bash
+        run: |
+          set -eux
+          export PSPDEV=/usr/local/pspdev
+          export PATH="$PSPDEV/bin:$PATH"
+          psp-gcc --version
+          make clean || true
+          make
+          test -s ttt_camera_dist01.prx
+          mkdir -p dist/TTT_CAMERA_DIST01
+          cp ttt_camera_dist01.prx dist/TTT_CAMERA_DIST01/
+          cp TTT_CAMERA_DIST01/plugin.ini dist/TTT_CAMERA_DIST01/
+          cp README_PTBR.md dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TTT-Camera-Afastada-V01-Experimental
+          path: dist/
