@@ -1,63 +1,57 @@
-# TTT Camera FOV V0.5 — Teste de perspectiva (ULUS10537 / PPSSPP)
+# TTT Camera FOV V0.6 — diagnostico de matrizes A/B
 
-**Objetivo:** testar uma visão mais ampla preservando a posição original da câmera e os valores do viewport. É experimental: o offset de projeção `+0xC0` foi identificado no ELF, mas o efeito visual no PPSSPP ainda precisa ser confirmado.
+**ULUS10537 / PPSSPP somente.** Esta versao nao modifica o viewport nem afasta fisicamente a camera.
 
-## Instalação e compilação
+## Por que esta versao
 
-1. **Desative** TTT_CAMERA_DIST03, SAFE04, SAFE041, outros PRXs de câmera e cheats de viewport/FPS.
-2. Extraia o projeto completo para um **repositório próprio** no GitHub, preservando as pastas `.github`, `src`, `tests`, `TTT_CAMERA_FOV05` e os arquivos Makefile/exports.exp.
-3. Em GitHub Actions, execute **TTT Camera FOV V05 (experimental)**. Não exige Python no ambiente PSPDEV.
-4. Baixe o artefato `TTT-Camera-FOV-V05-Experimental` produzido pelo workflow.
-5. Copie **a pasta inteira** `TTT_CAMERA_FOV05` do artefato para `PSP/PLUGINS/TTT_CAMERA_FOV05` no PPSSPP. Os arquivos devem estar lado a lado:
+Na V0.5, o codigo alterou coeficientes e o log registrou resultados diferentes, mas **nao houve mudanca visual**. O ELF mostra ao menos duas matrizes potenciais de projecao e duas matrizes combinadas. A V0.6 testa A (`camera+0x80`) e B (`camera+0xC0`) de forma independente e monitora a chamada de envio de matrizes em `0x089AC4F0`.
+
+Isso **nao prova** que A/B representam o FOV principal. O objetivo e determinar qual caminho realmente modifica a imagem.
+
+## Modos: L + R + Triangulo
+
+- **0** = original (inicial)
+- **1** = multiplica os coeficientes [0] e [5] da matriz A (`+0x80`) por **0,70**
+- **2** = mesmos coeficientes da matriz B (`+0xC0`) por **0,70** (contraprova V0.5)
+- **3** = multiplica ambas A e B por 0,70
+
+Fator 0,70 e deliberadamente alto para revelar a mudanca; **nao e 30% exatos de FOV**. Nao teste em uma partida para salvar progresso.
+
+## Compilacao GitHub Actions
+
+1. Extraia todo o projeto para um repositorio GitHub proprio, preservando `.github/workflows`, `src`, `tests`, `Makefile`, `exports.exp` e `TTT_CAMERA_FOV06`.
+2. Execute **TTT Camera FOV V06 (matrizes A/B)** no Actions.
+3. Baixe o artefato produzido e instale a pasta `TTT_CAMERA_FOV06` completa em `PSP/PLUGINS/TTT_CAMERA_FOV06`.
+4. Ative o plugin do PPSSPP, desative **todos os outros plugins de camera** e cheats de viewport e reinicie o jogo.
+
+Arquivos corretos lado a lado:
 
 ```
-PSP/PLUGINS/TTT_CAMERA_FOV05/
+PSP/PLUGINS/TTT_CAMERA_FOV06/
   plugin.ini
-  ttt_camera_fov05.prx
+  ttt_camera_fov06.prx
 ```
 
-6. Ative o plugin nas configurações de plugin do PPSSPP e reinicie o jogo.
-
-O `plugin.ini` usa exatamente o formato que você enviou:
+`plugin.ini` sera validado ANTES e DEPOIS da compilacao, no formato do arquivo que voce enviou:
 
 ```ini
 [options]
 version = 1
 type = prx
-filename = ttt_camera_fov05.prx
+filename = ttt_camera_fov06.prx
 
 [games]
 ULUS10537 = true
 ```
 
-O workflow **confere esse nome automaticamente** e falha se o PRX não corresponder.
+## Protocolo de teste
 
-## Modos
+Entre em uma batalha e compare a mesma cena com o Goku parado: original, modo 1, original, modo 2, original, modo 3. Deixe cada modo alguns segundos; observe **personagem, chao e efeitos**. Se houver uma distorcao anormal, desative o plugin e reinicie.
 
-O plugin começa **desligado**. Em batalha, pressione **L + R + Triângulo** e solte antes de cada toque:
+Depois, envie `PSP/PLUGINS/TTT_CAMERA_FOV06/diagnostico_fov_v06.txt` e diga qual modo mudou visualmente.
 
-- 0: original (fator 1,00)
-- 1: campo visual levemente maior (coeficientes x0,92)
-- 2: campo visual intermediário (coeficientes x0,84)
-- 3: campo visual mais amplo (coeficientes x0,76)
+## Diagnostico
 
-**Importante:** esses números são fatores dos coeficientes da matriz, não graus ou aumento exato percentual do FOV. O motor pode usar várias matrizes; caso nenhum modo tenha efeito, o diagnóstico nos orientará a testar a matriz correta.
+O log registra `rebuild`, `draw`, `upload` e os coeficientes de A/B/C e os resultados enviados. `upload` > 0 confirma que o hook de envio executou; `applied` > 0 confirma apenas uma alteracao numerica, **nao confirma efeito visual**.
 
-## O que é modificado
-
-- Hook comprovadamente executado na batalha em `0x089AC4E0`, que chama a rotina original `0x089ABE54`.
-- Modifica temporariamente os componentes de escala X/Y da matriz de perspectiva em `camera + 0xC0` (índices 0 e 5), chama a rotina original e **restaura** os componentes originais antes de retornar.
-- Mantém a posição/rotação da câmera, viewport, lógica da batalha, FOV de outras câmeras fora dessa rotina e tempo de quadros **inalterados**.
-- Outro hook apenas observa a câmera efetiva em `0x0885AD5C`.
-
-## Teste solicitado
-
-Compare com a câmera original no mesmo cenário: Goku parado, movimento lateral, combo e Kamehameha. Observe se os efeitos estão alinhados e se personagens não somem nos cantos. Não é garantido que os cortes dos especiais desapareçam; o game pode usar outra câmera ou outro pipeline de projeção.
-
-Log: `PSP/PLUGINS/TTT_CAMERA_FOV05/diagnostico_fov_v05.txt`.
-
-No log, `rebuild` deve subir durante a luta; `applied` deve subir nos modos 1–3 se os coeficientes forem válidos. `p00/p11` são os valores da matriz de projeção original; `out00/out11` são do resultado da reconstrução. Zero em `applied` significa que o plugin não alterou as matrizes, mesmo que tenha instalado os hooks.
-
-**Segurança:** experimento para PPSSPP e ULUS10537 somente. Pode haver renderização incorreta/travamento. Se houver, desative o plugin e reinicie o PPSSPP. Não grave progresso durante o teste.
-
-**Validação local:** estrutura, offsets e instruções do ELF e checagem `plugin.ini`; a compilação PSPDEV e o resultado visual ainda precisam do teste no seu GitHub/PPSSPP.
+A compilacao no PSPDEV e o efeito visual dependem do seu teste no PPSSPP. O teste de sintaxe local usa cabecalhos temporarios e nao substitui o PSPDEV.

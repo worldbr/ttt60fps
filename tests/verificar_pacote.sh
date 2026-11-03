@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 # Check the exact PPSSPP format supplied by the user. No Python needed.
-FILE="TTT_CAMERA_FOV05/plugin.ini"
-PRX="ttt_camera_fov05.prx"
+FILE="TTT_CAMERA_FOV06/plugin.ini"
+PRX="ttt_camera_fov06.prx"
 [ -f "$FILE" ]
 grep -Fx '[options]' "$FILE" >/dev/null
 grep -Fx 'version = 1' "$FILE" >/dev/null
