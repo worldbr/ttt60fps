@@ -1,41 +1,31 @@
-# TTT Camera Distance — V0.3 experimental (PPSSPP / ULUS10537)
+# TTT CAMERA SAFE04 — teste de enquadramento (ULUS10537 / PPSSPP)
 
-## Por que a V0.3?
-- A V0.1 interceptou 2 calls que não eram executados na batalha.
-- A V0.2 confirmou o ponteiro global da câmera e 30 chamadas/segundo no desenho (0x0885AD5C).
-- Análise estática do ELF confirmou um terceiro callsite para reconstrução das matrizes: `0x089AC4E0`, com `JAL 0x089ABE54`, precedido por `0x089AC4D4 -> 0x089ABEE0` que prepara a transformação original.
-- A V0.3 intercepta **ambas** as chamadas (`0x089AC4E0` para alteração experimental, `0x0885AD5C` para medição), preservando o JAL delay slot e chamando cada função original uma vez.
+## O que este teste faz
+- Preserva os dois hooks da V0.3 e suas chamadas originais.
+- Não modifica viewport, FOV, FPS, modelos nem efeitos.
+- Descobre a família das quatro câmeras regulares de batalha (passo 0x290).
+- Ignora o deslocamento quando o jogo desenha com câmera de outra família; isso pode proteger cenas especiais.
+- Em modo 4, aplica -40 unidades em condições estáveis, mas volta suavemente para -8 durante movimentos bruscos da câmera.
+- **É experimental:** pode reduzir cortes de enquadramento, mas não conhece os limites de tela de cada lutador nem recalcúla o ponto de foco. Não é a correção definitiva de combos.
 
-## Instalação
-1. Desative PRXs de câmera antigos e quaisquer cheats de viewport/FOV e cheats de 60 FPS. Reinicie completamente PPSSPP.
-2. Coloque os arquivos na raiz do seu repositório de GitHub e execute `Actions -> TTT Camera Distance V03 (experimental)`.
-3. Copie o diretório compilado `TTT_CAMERA_DIST03` para `PSP/PLUGINS/` no PPSSPP e habilite o plugin para ULUS10537.
-4. Inicie a batalha normalmente; o plugin começa no modo 0 (desligado).
-5. Aperte **L + R + Triângulo** (uma vez por mudança de modo):
-   - Modo 0: original, sem alteração.
-   - Modo 1: +40 unidades no eixo Z local da câmera.
-   - Modo 2: +80 unidades no eixo Z local.
-   - Modo 3: -40 unidades no eixo Z local (teste da direção oposta).
-6. Movimente Goku, use Kamehameha e observe alinhamento de personagem/efeitos, distância e movimentação.
-7. Envie `PSP/PLUGINS/TTT_CAMERA_DIST03/diagnostico_camera_v03.txt` e conte o que mudou em cada modo.
+## Botão
+L + R + Triângulo alterna: 0 original; 1 -15; 2 -25; 3 -40 (com proteção de câmera especial); 4 automático (-40/-8).
+A versão V0.3 usava -40 como modo 3. O modo 4 é o mais importante para comparar.
 
-## Segurança e limites
-- **Experimental.** O novo hook de reconstrução foi confirmado estaticamente, mas **ainda não foi confirmado que esse callsite executa durante a batalha**. O log mostra contadores `rebuild`, `modified` e `draw` para separar os casos.
-- Em modos 1-3, a alteração ocorre **depois da preparação original da matriz e antes de reconstruir matrizes derivadas**, evitando alterar diretamente o viewport.
-- O eixo Z local pode apontar para frente ou para trás. Se os modos positivos aproximarem, experimente modo 3.
-- Ainda é possível que efeitos, câmera especiais ou colisões não acompanhem o afastamento corretamente.
-- Se aparecer tremor, efeito deslocado, travamento ou câmera desalinhada, desligue o plugin e reinicie PPSSPP. Não salve o jogo com câmera modificada.
-- Não usar simultaneamente com V0.1, V0.2 ou plugin de expansão. Não altera ISO, FPS ou arquivos do jogo.
-- A compilação PSPDEV e a execução no PPSSPP **ainda dependem do teste do usuário**.
+## GitHub Actions
+1. Coloque os arquivos deste projeto na raiz do repositório.
+2. Actions > TTT Camera Safe Framing V04 > Run workflow.
+3. Baixe o artefato; copie a pasta `TTT_CAMERA_SAFE04` para `PSP/PLUGINS` e habilite o plugin no PPSSPP.
+4. Desative o PRX V0.3 e todos os cheats de viewport/60 FPS antes de testar.
 
-## Interpretação do log
-- `draw=+150` por 5s: visualização da câmera ativa continua monitorada.
-- `rebuild=+N`: reconstrução executada; `rebuild=0` indica que a rotina escolhida não é ativa nesse cenário.
-- `modified=+N` em modo >0: escreveu na matriz antes do rebuild.
-- `rejected`: ponteiro ou matriz falhou nas verificações de segurança.
-- `rebuild_cam`, `draw_cam`, `active`: endereços para avaliar se modificamos a mesma câmera que a batalha usa.
-- `old_xyz_bits`: posição antes do deslocamento, em floats IEEE754.
+## Teste
+Compare modo 3 e modo 4 durante: luta parada; deslocamento com analógico para esquerda/direita; combo longo; início de especial; close antes de especial; retorno da câmera à luta. Sem save state automático.
 
-## Referência do ELF
-SHA-256: `834605685873da14647b1dfe7bf332e326dd2a99a48840877da13d211ea18b1e`.
-Sites e opcodes validados nesse arquivo, não garantidos para outros executáveis ou regiões.
+## Log
+`ms0:/PSP/PLUGINS/TTT_CAMERA_SAFE04/diagnostico_camera_v04.txt`
+Confira: `normal=0x...` (câmera padrão encontrada), `special_skip` (câmera diferente detectada), `tracking_trigger` (movimento rápido detectado), `shift_bits` (último afastamento aplicado), `modified`.
+
+## Limitações / recuperação
+A V0.4 não calcula onde o Goku/Vegeta estão na tela. Os cortes nos cantos podem persistir. Pular o ajuste durante câmera cinematográfica depende de o jogo usar outro ponteiro; se usar a mesma câmera, não detecta a mudança. Por isso mantenha backup e reinicie o PPSSPP para restaurar os hooks.
+
+Compilação PSPDEV e execução no jogo ainda não foram confirmadas.

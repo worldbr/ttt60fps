@@ -1,4 +1,4 @@
-TARGET = ttt_camera_dist03
+TARGET = ttt_camera_safe04
 OBJS = src/main.o
 CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu11 -ffreestanding -fno-builtin -fno-stack-protector
 LDFLAGS = -nostartfiles
