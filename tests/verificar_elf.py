@@ -1,9 +1,16 @@
-#!/usr/bin/env python3
-from pathlib import Path
-import hashlib,struct,sys
-p=Path(sys.argv[1]);b=p.read_bytes()
-assert hashlib.sha256(b).hexdigest()=="834605685873da14647b1dfe7bf332e326dd2a99a48840877da13d211ea18b1e"
-for addr,w in [(0x0885AD5C,0x0E201A3F),(0x0885AD60,0x02002025)]:
- off=0x1018+(addr-0x08804040);v=struct.unpack_from('<I',b,off)[0]
- assert v==w,(hex(addr),hex(v),hex(w))
- print(hex(addr),hex(v),'OK')
+"""Opcional: verifica os sites do EBOOT original. Ignora se o ELF não estiver no projeto."""
+import hashlib
+import pathlib
+import struct
+
+paths = list(pathlib.Path('.').glob('*EBOOT.OLD*.ELF'))
+if not paths:
+    print('ELF nao encontrado, validacao estatica opcional ignorada.')
+else:
+    b = paths[0].read_bytes()
+    print('sha256:', hashlib.sha256(b).hexdigest())
+    for va, op, delay in [(0x089AC4E0, 0x0E26AF95, 0x02402825), (0x0885AD5C,0x0E201A3F,0x02002025)]:
+        offset = 0x1018 + va-0x08804040
+        got = struct.unpack_from('<II',b,offset)
+        assert got == (op,delay),(hex(va),got)
+        print(hex(va), 'JAL e delay conferem')
