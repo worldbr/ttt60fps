@@ -1,51 +1,25 @@
-# TTT — câmera mais afastada: Teste 01 (experimental)
+# TTT Camera Diagnostico V02 — ULUS10537 / PPSSPP
 
-**Jogo**: Dragon Ball Z Tenkaichi Tag Team **ULUS10537**, apenas PPSSPP. **Sem alteração na ISO.**
+## Por que criamos a V02?
+O log da V01 comprovou que os 2 callsites escolhidos nunca foram atingidos (call_A=call_B=0); por isso nenhuma alteracao aconteceu. Nesta V02, medimos um JAL diretamente dentro do desenho da batalha:
 
-## Ideia
+- `0x0885AD5C`: `jal 0x088068FC` (word `0x0E201A3F`)
+- `0x0885AD60`: `move a0,s0` (word `0x02002025`), preservado como delay slot.
+- `s0` vem de `*(uint32_t *)0x08A7E25C` (ponteiro ativo da camera).
 
-Este experimento **não** altera a escala do viewport (`0x08A784F4/F8`) e **não** altera os FPS.
+**A V02 nao afasta a camera.** E um teste exclusivamente de monitoramento para confirmar que o codigo executa durante a batalha, qual estrutura e usada e quais sao as transformacoes. Nao mexe na renderizacao, viewport, FPS nem faz NOP em funcoes.
 
-O ELF mostra que a rotina `0x089ABEE0` produz a transformação da câmera e que `0x089ABE54` prepara suas matrizes. Existem duas chamadas `jal 0x089ABE54`, em `0x089AB02C` e `0x089AB734`. O projeto as intercepta preservando seus delay slots, desloca a translação da matriz `cam+0x40` (elementos `+0x70`, `+0x74`, `+0x78`) ao longo da terceira coluna (`cam+0x60`, `+0x64`, `+0x68`) e executa a rotina original **uma vez por chamada**.
+## Instalar
+1. Desative TTT_CAMERA_DIST01 (V01), cheats de camera e PRXs experimentais.
+2. Coloque os arquivos do ZIP na raiz do repositorio GitHub e rode `Actions > TTT - Camera Diagnostico V02 > Run workflow`.
+3. Baixe o artifact. Copie a pasta `TTT_CAMERA_DIAG02` gerada para `PSP/PLUGINS/` do PPSSPP.
+4. Confirme que o plugin esta habilitado e reinicie o emulador.
+5. Entre numa batalha por 15 a 20 segundos e mova a camera. Volte ao menu e envie o arquivo `PSP/PLUGINS/TTT_CAMERA_DIAG02/diagnostico_camera_v02.txt`.
 
-**Atenção: o sentido de afastamento (+Z) e a persistência da posição ainda precisam ser validados no PPSSPP.** Dependendo do sistema interno de coordenadas, +Z pode aproximar em vez de afastar. O plugin inclui um modo com sinal invertido. O movimento é um deslocamento em **unidades do jogo**, não um percentual comprovado. Se o motor mantiver a posição modificada entre quadros, o afastamento pode se acumular; nesse caso desligue pelo atalho e reinicie o emulador. Evite saves durante o experimento.
+## Como interpretar
+- `hits` proximo de 150 por 5 s em combate 30 FPS: novo callsite confirmado.
+- `hits=0`: caminho ainda nao e atingido ou hook precisa ser revisado; nada sera alterado.
+- `arg` e `global` mostram o ponteiro recebido na chamada e o ponteiro global da camera ativa.
+- `mat40_*` mostra os bits IEEE754 das componentes da matriz de camera, SEM escrever nelas.
 
-## Instalação e compilação
-
-1. Faça uma cópia de segurança e **desative todos os cheats de câmera** do seu amigo (`002784F4`/`002784F8` ou `202784F4`/`202784F8), os cheats de 60 FPS e os PRXs antigos de FPS/expansão. Reinicie o PPSSPP para restaurar a RAM.
-2. Envie o conteúdo **desta pasta** para a raiz de um repositório GitHub. Execute **Actions > TTT - Camera afastada V01 experimental > Run workflow**. O arquivo gerado estará no artefato `TTT-Camera-Afastada-V01-Experimental`.
-3. Copie `TTT_CAMERA_DIST01/ttt_camera_dist01.prx` e `plugin.ini` para `memstick/PSP/PLUGINS/TTT_CAMERA_DIST01`, conforme seu diretório real de memstick do PPSSPP, e ative o plugin.
-4. Abra uma batalha comum. O plugin começa **DESATIVADO** por segurança; use **L + R + TRIÂNGULO** para alternar os modos.
-
-| Modo | Deslocamento da câmera |
-|---|---|
-| 0 | original (sem alteração) |
-| 1 | +80 unidades ao longo do eixo local Z (primeiro teste) |
-| 2 | +160 unidades ao longo do eixo local Z |
-| 3 | -80 unidades (teste de direção oposta) |
-
-**Observação importante:** isto é um protótipo técnico para localizar o sentido correto da câmera. Ainda não é uma câmera de 120% nem um cheat final validado. Se o personagem sair da tela, ocorrer travamento ou a câmera se afastar sem parar, **pare o teste**, desligue o plugin e reinicie o PPSSPP.
-
-## Log de diagnóstico
-
-O PRX grava `PSP/PLUGINS/TTT_CAMERA_DIST01/diagnostico_camera.txt` a cada 5 segundos e quando você muda de modo.
-
-- `HOOKS INSTALADOS 2/2`: chamadas reconhecidas, mas **não garante** câmera correta.
-- `call_A/B`: número de vezes que cada rota de câmera é executada.
-- `aplicado`: quantas vezes a translação foi alterada.
-- `ignorado`: matriz com valores inválidos ou fora dos limites de segurança.
-- `posbits`: números float originais antes do deslocamento, em hexadecimal IEEE-754.
-- `len2bits`: norma ao quadrado do eixo Z; normalmente perto de `3F800000` (=1.0).
-
-## O que testar
-
-1. Compare o modo 0 com 1 usando Goku parado diante de um objeto fixo do cenário; observe se a câmera se **afasta** ou **aproxima**, e se ela continua apontada para Goku.
-2. Mova o personagem e veja se a distância permanece estável, sem aumentar sozinha ao longo do tempo.
-3. Carregue Kamehameha; observe energia, feixe e explosões. Teste também o modo 2 somente se modo 1 estiver estável.
-4. Envie o **log e o resultado visual**. Com isso ajustaremos sinal/matriz e tentaremos um cheat ou patch mais estável.
-
-## Validação / limitações
-
-O ELF original fornecido possui SHA-256 `834605685873da14647b1dfe7bf332e326dd2a99a48840877da13d211ea18b1e`. O projeto verifica os dois JALs e seus delay slots antes de escrever. O script `tests/verificar_elf.py` valida essas instruções no ELF fornecido.
-
-Código validado estaticamente, sem build real PSPDEV nem execução PPSSPP neste ambiente. **É possível que não modifique a câmera ou que provoque glitches**; o propósito é obter uma medida reproduzível em vez de alterar endereços arbitrários.
+A verificacao local analisa o ELF original exato, SHA256 `834605685873da14647b1dfe7bf332e326dd2a99a48840877da13d211ea18b1e`. Compilacao no PSPDEV e funcionamento no PPSSPP aguardam teste.
