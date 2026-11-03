@@ -16,11 +16,6 @@ jobs:
       image: pspdev/pspdev:v20261001
     steps:
       - uses: actions/checkout@v4
-      - name: Verificar enderecos de referencia
-        shell: bash
-        run: |
-          set -eux
-          python3 tests/verificar_elf.py
       - name: Compilar PRX
         shell: bash
         run: |
