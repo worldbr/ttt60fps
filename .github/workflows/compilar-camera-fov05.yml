@@ -1,0 +1,42 @@
+name: TTT Camera FOV V05 (experimental)
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/**'
+      - 'Makefile'
+      - 'exports.exp'
+      - 'TTT_CAMERA_FOV05/**'
+      - 'tests/verificar_pacote.sh'
+      - '.github/workflows/compilar-camera-fov05.yml'
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container:
+      image: pspdev/pspdev:v20261001
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validar plugin.ini
+        shell: sh
+        run: sh tests/verificar_pacote.sh
+      - name: Compilar e empacotar PRX
+        shell: bash
+        run: |
+          set -eux
+          export PSPDEV=/usr/local/pspdev
+          export PATH="$PSPDEV/bin:$PATH"
+          psp-gcc --version
+          make clean || true
+          make
+          sh tests/verificar_pacote.sh --check-prx
+          mkdir -p dist/TTT_CAMERA_FOV05
+          cp ttt_camera_fov05.prx dist/TTT_CAMERA_FOV05/
+          cp TTT_CAMERA_FOV05/plugin.ini dist/TTT_CAMERA_FOV05/
+          cp README_PTBR.md dist/
+          test -s dist/TTT_CAMERA_FOV05/ttt_camera_fov05.prx
+          grep -Fx 'filename = ttt_camera_fov05.prx' dist/TTT_CAMERA_FOV05/plugin.ini
+      - name: Disponibilizar plugin pronto
+        uses: actions/upload-artifact@v4
+        with:
+          name: TTT-Camera-FOV-V05-Experimental
+          path: dist/
