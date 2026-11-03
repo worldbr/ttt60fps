@@ -1,0 +1,35 @@
+name: TTT Camera Safe V041 (corrigida)
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/**'
+      - 'Makefile'
+      - 'exports.exp'
+      - 'TTT_CAMERA_SAFE041/**'
+      - '.github/workflows/compilar-camera-v041.yml'
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container:
+      image: pspdev/pspdev:v20261001
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilar PRX
+        shell: bash
+        run: |
+          set -eux
+          export PSPDEV=/usr/local/pspdev
+          export PATH="$PSPDEV/bin:$PATH"
+          psp-gcc --version
+          make clean || true
+          make
+          test -s ttt_camera_safe041.prx
+          mkdir -p dist/TTT_CAMERA_SAFE041
+          cp ttt_camera_safe041.prx dist/TTT_CAMERA_SAFE041/
+          cp TTT_CAMERA_SAFE041/plugin.ini dist/TTT_CAMERA_SAFE041/
+          cp README_PTBR.md dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TTT-Camera-Safe-V041-Experimental
+          path: dist/
