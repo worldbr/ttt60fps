@@ -1,11 +1,12 @@
 /*
- * Tenkaichi Tag Team ULUS10537 - experimental 60 Hz draw / 30 Hz task update
- * Requires companion CWCheat forcing vblank step=1:
- *   _L 0x20278E0C 0x00000001
+ * Dragon Ball Z: Tenkaichi Tag Team - ULUS10537 - PPSSPP
+ * TESTE 07: diagnosis ONLY, original game calls execute EVERY frame.
+ * Does not patch the VBlank value. Does not skip or throttle updates.
+ * Original ELF SHA-256: 834605685873da14647b1dfe7bf332e326dd2a99a48840877da13d211ea18b1e
  *
- * WARNING: independent, experimental plugin. Not a full 60 FPS solution.
- * Verified against EBOOT.OLD.ELF SHA256
- * 834605685873da14647b1dfe7bf332e326dd2a99a48840877da13d211ea18b1e
+ * Five JAL callsites are temporarily redirected to wrappers which increment
+ * a counter and then call the ORIGINAL target. Original MIPS delay slots remain.
+ * No IO in any hook; disk access only occurs in the separate worker thread.
  */
 #include <pspuser.h>
 #include <pspiofilemgr.h>
@@ -13,199 +14,220 @@
 #include <stdint.h>
 #include <stddef.h>
 
-PSP_MODULE_INFO("TTTFPSTest05", PSP_MODULE_USER, 1, 0);
+PSP_MODULE_INFO("TTTFPSTest07", PSP_MODULE_USER, 1, 0);
 PSP_NO_CREATE_MAIN_THREAD();
 
-#define TTT_UPDATE_CALL_ADDR 0x0887B9D4u
-#define TTT_UPDATE_CALL_WORD 0x0E240784u /* jal 0x08901E10 */
-#define TTT_UPDATE_FN_ADDR   0x08901E10u
-#define TTT_VBLANK_STEP_ADDR 0x08A78E0Cu
-#define FPS_LOG "ms0:/PSP/PLUGINS/TTT_FPS_TEST/diagnostico_60fps.txt"
+#define FPS_LOG "ms0:/PSP/PLUGINS/TTT_FPS_TEST07/diagnostico_teste07.txt"
+#define VBLANK_STEP_ADDR 0x08A78E0Cu
+#define SAMPLE_DELAY_US 5000000u
+#define HOOKS 5u
 
-static volatile int g_running = 0;
-static volatile int g_installed = 0;
-static volatile uint32_t g_hits = 0;
-static volatile uint32_t g_actual_updates = 0;
-static volatile uint32_t g_skipped_updates = 0;
+/* Return values at these specific callsites are unused. For root walkers,
+ * the original delay-slot loads a0, which the wrapper receives unchanged. */
+typedef void (*VoidFn)(void);
+typedef void (*RootFn)(void *);
+
+static volatile uint32_t g_hits[HOOKS];
+static volatile int g_running;
+static volatile int g_installed;
 static SceUID g_worker = -1;
 
-typedef void (*UpdateWalker)(void *root);
-
-/* Executes in the game thread, invoked once per original update call.
- * The original call site delay-slot has already loaded a0 with the root
- * object pointer, so the C function receives exactly that pointer.
- * Never perform disk IO or other expensive work from this hook.
- */
-static __attribute__((noinline)) void update_every_other_frame(void *root) {
-    uint32_t hit = g_hits++;
-    if ((hit & 1u) == 0u) {
-        g_actual_updates++;
-        ((UpdateWalker)(uintptr_t)TTT_UPDATE_FN_ADDR)(root);
-    } else {
-        g_skipped_updates++;
-    }
+static __attribute__((noinline)) void observe_update_group(void) {
+    ++g_hits[0];
+    ((VoidFn)(uintptr_t)0x0887B9ACu)();
+}
+static __attribute__((noinline)) void observe_task_update(void *root) {
+    ++g_hits[1];
+    ((RootFn)(uintptr_t)0x08901E10u)(root);
+}
+static __attribute__((noinline)) void observe_draw_group(void) {
+    ++g_hits[2];
+    ((VoidFn)(uintptr_t)0x0887BA50u)();
+}
+static __attribute__((noinline)) void observe_task_draw(void *root) {
+    ++g_hits[3];
+    ((RootFn)(uintptr_t)0x08902134u)(root);
+}
+static __attribute__((noinline)) void observe_frame_composer(void) {
+    ++g_hits[4];
+    ((VoidFn)(uintptr_t)0x08837B68u)();
 }
 
-static uint32_t encode_jal(uintptr_t address) {
-    return UINT32_C(0x0C000000) | (((uint32_t)address >> 2) & UINT32_C(0x03FFFFFF));
+typedef struct HookSite {
+    uint32_t callsite;
+    uint32_t expected_jal;
+    uint32_t expected_delay;
+    void (*wrapper)(void);
+    const char *name;
+} HookSite;
+
+static const HookSite g_sites[HOOKS] = {
+    {0x0885AC9Cu, 0x0E21EE6Bu, 0x00000000u, observe_update_group,   "update_group"},
+    {0x0887B9D4u, 0x0E240784u, 0x8C840000u, (void (*)(void))observe_task_update, "task_update"},
+    {0x0885ACACu, 0x0E21EE94u, 0x00000000u, observe_draw_group,     "draw_group"},
+    {0x0887BB0Cu, 0x0E24084Du, 0x8C840000u, (void (*)(void))observe_task_draw,   "task_draw"},
+    {0x08804728u, 0x0E20DEDAu, 0x00000000u, observe_frame_composer, "frame_composer"},
+};
+
+static uint32_t jal_word(uintptr_t target) {
+    return 0x0C000000u | (((uint32_t)target >> 2) & 0x03FFFFFFu);
+}
+static void flush_code(void *site) {
+    sceKernelDcacheWritebackInvalidateRange(site, 4);
+    sceKernelIcacheInvalidateRange(site, 4);
 }
 
-static void log_line(const char *message) {
-    SceUID fd;
-    size_t len = 0;
-    if (!message) return;
-    while (message[len] && len < 1023u) ++len;
-    fd = sceIoOpen(FPS_LOG, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
-    if (fd < 0) return;
-    sceIoWrite(fd, message, (SceSize)len);
-    sceIoClose(fd);
+/* Explicit bounded formatting: no stdio, snprintf, libc, heap allocation. */
+static void add_text(char **w, char *last, const char *s) {
+    if (!s) return;
+    while (*s && *w < last) *(*w)++ = *s++;
 }
-
-static void flush_code(volatile uint32_t *site) {
-    void *p = (void *)(uintptr_t)site;
-    sceKernelDcacheWritebackInvalidateRange(p, 4);
-    sceKernelIcacheInvalidateRange(p, 4);
-}
-
-/* Avoid stdio/newlib inside the PRX: snprintf() pulled in libc.a and
- * made the linker demand _exit when building with -nostartfiles.
- * All formatting here is bounded and uses no standard C library calls. */
-static void append_text(char **pos, char *last, const char *src) {
-    if (!src) return;
-    while (*src && *pos < last) *(*pos)++ = *src++;
-}
-
-static void append_uint(char **pos, char *last, uint32_t number) {
-    char rev[10];
-    unsigned count = 0;
+static void add_u32(char **w, char *last, uint32_t n) {
+    char reverse[10];
+    unsigned k = 0;
     do {
-        rev[count++] = (char)('0' + (number % 10u));
-        number /= 10u;
-    } while (number && count < sizeof(rev));
-    while (count && *pos < last) *(*pos)++ = rev[--count];
+        reverse[k++] = (char)('0' + n % 10u);
+        n /= 10u;
+    } while (n && k < 10u);
+    while (k && *w < last) *(*w)++ = reverse[--k];
 }
-
-static void append_hex32(char **pos, char *last, uint32_t number) {
-    static const char digits[] = "0123456789ABCDEF";
-    int shift;
-    for (shift = 28; shift >= 0 && *pos < last; shift -= 4)
-        *(*pos)++ = digits[(number >> shift) & 15u];
+static void add_hex(char **w, char *last, uint32_t n) {
+    static const char h[] = "0123456789ABCDEF";
+    int k;
+    for (k = 28; k >= 0 && *w < last; k -= 4) *(*w)++ = h[(n >> k) & 0xFu];
 }
-
-static void log_status(const char *label) {
-    char msg[250];
-    char *pos = msg;
-    char *last = msg + sizeof(msg) - 1;
-    uint32_t word = *(volatile uint32_t *)(uintptr_t)TTT_UPDATE_CALL_ADDR;
-    uint32_t step = *(volatile uint32_t *)(uintptr_t)TTT_VBLANK_STEP_ADDR;
-    append_text(&pos, last, "[TESTE05] ");
-    append_text(&pos, last, label);
-    append_text(&pos, last, " callsite=");
-    append_hex32(&pos, last, word);
-    append_text(&pos, last, " step=");
-    append_uint(&pos, last, step);
-    append_text(&pos, last, " hits=");
-    append_uint(&pos, last, g_hits);
-    append_text(&pos, last, " actual=");
-    append_uint(&pos, last, g_actual_updates);
-    append_text(&pos, last, " skipped=");
-    append_uint(&pos, last, g_skipped_updates);
-    append_text(&pos, last, " installed=");
-    append_uint(&pos, last, (uint32_t)g_installed);
-    append_text(&pos, last, "\n");
-    *pos = '\0';
+static void log_line(const char *s) {
+    SceUID file;
+    size_t n = 0;
+    if (!s) return;
+    while (s[n] && n < 1023u) ++n;
+    file = sceIoOpen(FPS_LOG, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
+    if (file < 0) return;
+    sceIoWrite(file, s, (SceSize)n);
+    sceIoClose(file);
+}
+static void log_issue(const char *label, unsigned index, uint32_t expected, uint32_t actual) {
+    char msg[240];
+    char *w = msg;
+    char *end = msg + sizeof(msg) - 1;
+    add_text(&w, end, "[T07] ERRO "); add_text(&w, end, label);
+    add_text(&w, end, " site="); add_text(&w, end, g_sites[index].name);
+    add_text(&w, end, " endereco=0x"); add_hex(&w, end, g_sites[index].callsite);
+    add_text(&w, end, " esperado=0x"); add_hex(&w, end, expected);
+    add_text(&w, end, " lido=0x"); add_hex(&w, end, actual);
+    add_text(&w, end, "\n"); *w = 0;
     log_line(msg);
 }
-
-static int install_hook(void) {
-    volatile uint32_t *site = (volatile uint32_t *)(uintptr_t)TTT_UPDATE_CALL_ADDR;
-    uintptr_t hook = (uintptr_t)&update_every_other_frame;
-    uint32_t value;
-    /* MIPS JAL and this particular callsite must reside in the same 256 MB
-     * address region.  Align and range checks prevent invalid jumps. */
-    if ((hook & 3u) || ((hook >> 28) != ((TTT_UPDATE_CALL_ADDR + 4u) >> 28))) {
-        log_line("[TESTE05] ERRO: funcao hook nao alcancavel por JAL.\n");
-        return -1;
+static int validate_sites(void) {
+    unsigned i;
+    for (i=0; i<HOOKS; ++i) {
+        const HookSite *h = &g_sites[i];
+        volatile uint32_t *mem = (volatile uint32_t *)(uintptr_t)h->callsite;
+        uintptr_t wrapper = (uintptr_t)h->wrapper;
+        if ((wrapper & 3u) || (wrapper >> 28) != ((h->callsite + 4u) >> 28)) {
+            log_issue("JAL fora do alcance", i, h->expected_jal, (uint32_t)wrapper);
+            return -1;
+        }
+        if (mem[0] != h->expected_jal) {
+            log_issue("opcode incompativel", i, h->expected_jal, mem[0]);
+            return -2;
+        }
+        if (mem[1] != h->expected_delay) {
+            log_issue("delay slot incompativel", i, h->expected_delay, mem[1]);
+            return -3;
+        }
     }
-    value = *site;
-    if (value != TTT_UPDATE_CALL_WORD) {
-        char msg[128];
-        char *pos = msg;
-        char *last = msg + sizeof(msg) - 1;
-        append_text(&pos, last, "[TESTE05] ERRO: opcode esperado=");
-        append_hex32(&pos, last, TTT_UPDATE_CALL_WORD);
-        append_text(&pos, last, " lido=");
-        append_hex32(&pos, last, value);
-        append_text(&pos, last, ". NADA ALTERADO.\n");
-        *pos = '\0';
-        log_line(msg);
-        return -2;
-    }
-    g_hits = 0;
-    g_actual_updates = 0;
-    g_skipped_updates = 0;
-    *site = encode_jal(hook);
-    flush_code(site);
-    g_installed = 1;
-    log_status("HOOK INSTALADO");
     return 0;
 }
-
-static void remove_hook(void) {
-    volatile uint32_t *site = (volatile uint32_t *)(uintptr_t)TTT_UPDATE_CALL_ADDR;
-    uint32_t patched = encode_jal((uintptr_t)&update_every_other_frame);
-    if (g_installed && *site == patched) {
-        *site = TTT_UPDATE_CALL_WORD;
-        flush_code(site);
+static int install_hooks(void) {
+    unsigned i;
+    if (validate_sites() < 0) return -1;
+    for (i=0; i<HOOKS; ++i) {
+        volatile uint32_t *mem = (volatile uint32_t *)(uintptr_t)g_sites[i].callsite;
+        mem[0] = jal_word((uintptr_t)g_sites[i].wrapper);
+        flush_code((void *)(uintptr_t)mem);
+    }
+    g_installed = 1;
+    log_line("[T07] HOOKS INSTALADOS 5/5; chamadas originais preservadas.\n");
+    return 0;
+}
+static void remove_hooks(void) {
+    unsigned i;
+    if (!g_installed) return;
+    for (i=0; i<HOOKS; ++i) {
+        const HookSite *h = &g_sites[i];
+        volatile uint32_t *mem = (volatile uint32_t *)(uintptr_t)h->callsite;
+        if (mem[0] == jal_word((uintptr_t)h->wrapper)) {
+            mem[0] = h->expected_jal;
+            flush_code((void *)(uintptr_t)mem);
+        }
     }
     g_installed = 0;
 }
-
+static void sample_log(const char *label, uint32_t *prev) {
+    char msg[550];
+    char *w = msg;
+    char *end = msg + sizeof(msg) - 1;
+    uint32_t step = *(volatile uint32_t *)(uintptr_t)VBLANK_STEP_ADDR;
+    unsigned i;
+    add_text(&w,end,"[T07] "); add_text(&w,end,label);
+    add_text(&w,end," step="); add_u32(&w,end,step);
+    add_text(&w,end," instalado="); add_u32(&w,end,(uint32_t)g_installed);
+    for (i=0; i<HOOKS; ++i) {
+        uint32_t current = g_hits[i];
+        add_text(&w,end," "); add_text(&w,end,g_sites[i].name);
+        add_text(&w,end,"="); add_u32(&w,end,current);
+        add_text(&w,end,"(+"); add_u32(&w,end,current-prev[i]);
+        add_text(&w,end,"/5s)");
+        prev[i]=current;
+    }
+    add_text(&w,end,"\n"); *w=0;
+    log_line(msg);
+}
 static int worker_thread(SceSize args, void *argp) {
-    int tries;
+    uint32_t previous[HOOKS] = {0,0,0,0,0};
+    unsigned tries;
     (void)args; (void)argp;
-    log_line("[TESTE05] Worker iniciado. Aguardando EBOOT ULUS10537...\n");
-    for (tries = 0; g_running && tries < 100; ++tries) {
-        uint32_t word = *(volatile uint32_t *)(uintptr_t)TTT_UPDATE_CALL_ADDR;
-        if (word == TTT_UPDATE_CALL_WORD) break;
+    log_line("[T07] Worker iniciado. Conferindo sites de hook...\n");
+    /* Wait for EBOOT to finish loading; allow a short startup period. */
+    for (tries=0; tries<100u && g_running; ++tries) {
+        if (*(volatile uint32_t *)(uintptr_t)g_sites[0].callsite == g_sites[0].expected_jal) break;
         sceKernelDelayThread(100000u);
     }
-    if (g_running && tries < 100 && install_hook() == 0) {
-        int iterations = 0;
-        while (g_running) {
-            sceKernelDelayThread(1000000u);
-            ++iterations;
-            if ((iterations % 5) == 0) log_status("AMOSTRA");
-        }
-        log_status("PARANDO");
-        remove_hook();
-    } else {
-        log_status("HOOK NAO INSTALADO");
+    if (!g_running || tries == 100u || install_hooks() != 0) {
+        log_line("[T07] HOOK NAO INSTALADO; nao foi modificada nenhuma instrucao.\n");
+        sceKernelExitDeleteThread(0);
+        return 0;
     }
+    log_line("[T07] Pronto. Capture amostras no menu (30 FPS baseline) e na batalha 60 FPS.\n");
+    while (g_running) {
+        sceKernelDelayThread(SAMPLE_DELAY_US);
+        if (g_running) sample_log("AMOSTRA", previous);
+    }
+    remove_hooks();
+    log_line("[T07] Hook removido.\n");
     sceKernelExitDeleteThread(0);
     return 0;
 }
-
 int module_start(SceSize args, void *argp) {
     (void)args; (void)argp;
     g_running = 1;
-    log_line("\n[TESTE05] Inicio. Controle de tarefas alternado 60/30 Hz.\n");
-    g_worker = sceKernelCreateThread("TTTFPSWorker05", worker_thread, 0x20, 0x2000, 0, NULL);
+    log_line("\n[T07] INICIO - DIAGNOSTICO SOMENTE; ZERO updates pulados.\n");
+    g_worker = sceKernelCreateThread("TTTFPSWorker07", worker_thread, 0x20, 0x2400, 0, NULL);
     if (g_worker < 0) {
-        log_line("[TESTE05] ERRO ao criar thread.\n");
-        g_running = 0;
+        g_running=0;
+        log_line("[T07] ERRO ao criar worker.\n");
         return 0;
     }
     if (sceKernelStartThread(g_worker, 0, NULL) < 0) {
-        log_line("[TESTE05] ERRO ao iniciar thread.\n");
-        g_running = 0;
+        g_running=0;
+        log_line("[T07] ERRO ao iniciar worker.\n");
     }
     return 0;
 }
-
 int module_stop(SceSize args, void *argp) {
     (void)args; (void)argp;
     g_running = 0;
-    remove_hook();
+    remove_hooks();
     return 0;
 }
